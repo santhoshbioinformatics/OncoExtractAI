@@ -1,0 +1,68 @@
+{
+  "reports": [
+    {
+      "report_id": "SYN-LUAD-001",
+      "cancer_type": "LUAD",
+      "is_synthetic": true,
+      "scenario": "complete",
+      "description": "Complete synthetic LUAD report with supported values for all four variables",
+      "text": "SYNTHETIC DEMONSTRATION REPORT — NO REAL PATIENT DATA\n\nSURGICAL PATHOLOGY REPORT\nSpecimen: Right lower lobectomy\n\nFINAL DIAGNOSIS:\n- Invasive adenocarcinoma.\n- Tumor size: 3.2 cm in greatest dimension.\n- Visceral pleural invasion is present.\n- Pathological T category: pT2a.\n- Eight regional lymph nodes are negative for metastatic carcinoma (0/8).\n- Pathological N category: pN0."
+    },
+    {
+      "report_id": "SYN-LUSC-002",
+      "cancer_type": "LUSC",
+      "is_synthetic": true,
+      "scenario": "no_nodes_cannot_be_assigned",
+      "description": "Synthetic LUSC report with no nodes submitted and pN unable to be assigned",
+      "text": "SYNTHETIC DEMONSTRATION REPORT — NO REAL PATIENT DATA\n\nSURGICAL PATHOLOGY REPORT\nSpecimen: Left upper lobectomy\n\nFINAL DIAGNOSIS:\n- Invasive squamous cell carcinoma.\n- Tumor size: 5.5 cm in greatest dimension.\n- Pathological T category: pT3.\n- No regional lymph nodes were submitted for pathologic evaluation.\n- A pathological N category cannot be assigned from this specimen."
+    },
+    {
+      "report_id": "SYN-LUAD-003",
+      "cancer_type": "LUAD",
+      "is_synthetic": true,
+      "scenario": "pn_not_documented",
+      "description": "Synthetic LUAD report with a true not-documented pN category",
+      "text": "SYNTHETIC DEMONSTRATION REPORT — NO REAL PATIENT DATA\n\nSURGICAL PATHOLOGY REPORT\nSpecimen: Right upper lobectomy\n\nFINAL DIAGNOSIS:\n- Invasive adenocarcinoma.\n- Tumor size: 2.8 cm in greatest dimension.\n- Pathological T category: pT1c.\n\nDOCUMENTATION NOTE:\nPathological N category: not documented."
+    },
+    {
+      "report_id": "SYN-LUSC-004",
+      "cancer_type": "LUSC",
+      "is_synthetic": true,
+      "scenario": "explicit_pnx",
+      "description": "Synthetic LUSC report with explicit pNX, distinct from pN0 and not documented",
+      "text": "SYNTHETIC DEMONSTRATION REPORT — NO REAL PATIENT DATA\n\nSURGICAL PATHOLOGY REPORT\nSpecimen: Left lower lobectomy\n\nFINAL DIAGNOSIS:\n- Invasive squamous cell carcinoma.\n- Tumor size: 1.9 cm in greatest dimension.\n- Pathological T category: pT1b.\n- Pathological N category: pNX.\n- Regional lymph nodes cannot be assessed because no nodal tissue is available."
+    },
+    {
+      "report_id": "SYN-LUAD-005",
+      "cancer_type": "LUAD",
+      "is_synthetic": true,
+      "scenario": "amended",
+      "description": "Synthetic LUAD report with an explicit addendum that supersedes preliminary size and pT values",
+      "text": "SYNTHETIC DEMONSTRATION REPORT — NO REAL PATIENT DATA\n\nSURGICAL PATHOLOGY REPORT\nSpecimen: Left lower lobectomy\n\nPRELIMINARY DIAGNOSIS:\n- Invasive adenocarcinoma.\n- Tumor size: 2.8 cm in greatest dimension.\n- Pathological T category: pT1c.\n- Pathological N category: pN0.\n\nADDENDUM:\nThis addendum explicitly supersedes the preliminary tumor size and pathological T category. Complete sampling establishes a tumor size of 4.1 cm and a revised pathological T category of pT2b.\n\nREVISED FINAL DIAGNOSIS:\n- Invasive adenocarcinoma.\n- Tumor size: 4.1 cm in greatest dimension.\n- Pathological T category: pT2b.\n- Pathological N category: pN0."
+    },
+    {
+      "report_id": "SYN-LUSC-006",
+      "cancer_type": "LUSC",
+      "is_synthetic": true,
+      "scenario": "conflicting",
+      "description": "Synthetic LUSC report with unresolved conflicting size, pT, and pN documentation",
+      "text": "SYNTHETIC DEMONSTRATION REPORT — NO REAL PATIENT DATA\n\nSURGICAL PATHOLOGY REPORT\nSpecimen: Right middle lobectomy\n\nFINAL DIAGNOSIS:\n- Invasive squamous cell carcinoma.\n- Tumor size is conflicting: the gross section records 3.8 cm and the microscopic section records 4.2 cm; no reconciled final measurement is designated.\n- Pathological T category is conflicting: the synoptic section records pT2a and the narrative section records pT2b; neither entry is designated final.\n- Pathological N category is conflicting: one section records pN0 and another records pN1; neither entry is designated final."
+    },
+    {
+      "report_id": "SYN-LUAD-007",
+      "cancer_type": "LUAD",
+      "is_synthetic": true,
+      "scenario": "uncertain",
+      "description": "Synthetic LUAD report with uncertain diagnosis, estimated size, and provisional pT",
+      "text": "SYNTHETIC DEMONSTRATION REPORT — NO REAL PATIENT DATA\n\nSURGICAL PATHOLOGY REPORT\nSpecimen: Right upper lobe wedge resection\n\nFINAL DIAGNOSIS:\n- Invasive adenocarcinoma is favored, but histologic classification remains uncertain pending additional stains.\n- Tumor size: approximately 1.8 cm because the specimen is fragmented.\n- Pathological T category: pT1b (provisional).\n- Pathological N category: pN0."
+    },
+    {
+      "report_id": "SYN-LUSC-008",
+      "cancer_type": "LUSC",
+      "is_synthetic": true,
+      "scenario": "negated",
+      "description": "Synthetic lung resection report with explicitly negated malignancy and no assignable stage",
+      "text": "SYNTHETIC DEMONSTRATION REPORT — NO REAL PATIENT DATA\n\nSURGICAL PATHOLOGY REPORT\nSpecimen: Right lower lobe wedge resection\nClinical history: Prior concern for squamous cell carcinoma\n\nFINAL DIAGNOSIS:\n- No evidence of invasive squamous cell carcinoma is identified.\n- No invasive tumor is identified for measurement.\n- Pathological T category cannot be assigned because no invasive primary tumor is identified.\n- Pathological N category: not documented."
+    }
+  ]
+}

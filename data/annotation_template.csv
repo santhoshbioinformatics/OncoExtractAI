@@ -1,0 +1,5 @@
+"report_id","cancer_type","variable_name","gold_value","evidence_text","evidence_start_offset","evidence_end_offset","documentation_status","manual_review_required","notes"
+"SYN-LUAD-001","LUAD","histologic_diagnosis","","","","","supported","False",""
+"SYN-LUAD-001","LUAD","tumor_size","","","","","supported","False",""
+"SYN-LUAD-001","LUAD","pathological_t_category","","","","","supported","False",""
+"SYN-LUAD-001","LUAD","pathological_n_category","","","","","supported","False",""

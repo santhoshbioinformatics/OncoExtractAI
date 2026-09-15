@@ -1,0 +1,35 @@
+# macOS and editor artifacts
+.DS_Store
+**/.DS_Store
+.idea/
+.vscode/
+
+# Python environments and caches
+.venv/
+venv/
+**/.venv/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local secrets and logs
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+*.log
+
+# Generated exports and evaluation snapshots
+outputs/*
+
+# Local trained model artifacts (retrainable from bundled synthetic gold)
+models/*.joblib
+
+# Real-world/raw datasets are local-only and are not demo assets
+data/raw/
+data/processed/
