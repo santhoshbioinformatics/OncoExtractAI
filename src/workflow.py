@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import hashlib
+from pathlib import Path
 from typing import Any, Literal, Mapping
 
 from pydantic import ValidationError
 
 from .evidence_validator import EvidenceValidator
 from .extractor import baseline_extract, evidence_first_extract
-from .ml_model import MLModelError, ml_extract
+from .ml_model import DEFAULT_MODEL_PATH, MLModelError, ml_extract
 from .qa_detector import QADetector
-from .schemas import CORE_VARIABLES, ExtractionResult
+from .pdf_processor import page_for_offset
+from .schemas import CORE_VARIABLES, ExtractionResult, ProcessedDocument
 
 
 ExtractionMethod = Literal["baseline", "evidence_first", "ml"]
@@ -18,6 +21,21 @@ ExtractionMethod = Literal["baseline", "evidence_first", "ml"]
 
 class ExtractionPipelineError(RuntimeError):
     """A safe reviewer-facing extraction failure."""
+
+
+def _artifact_version(method: ExtractionMethod) -> str:
+    """Return a reproducible implementation/artifact identifier."""
+
+    artifact = (
+        DEFAULT_MODEL_PATH
+        if method == "ml" and DEFAULT_MODEL_PATH.exists()
+        else Path(__file__).with_name("ml_model.py")
+        if method == "ml"
+        else Path(__file__).with_name("extractor.py")
+    )
+    digest = hashlib.sha256(artifact.read_bytes()).hexdigest()[:16]
+    family = "tfidf-logreg" if method == "ml" else f"{method}-rules"
+    return f"{family}-sha256:{digest}"
 
 
 def validate_result_contract(result: ExtractionResult) -> ExtractionResult:
@@ -64,16 +82,38 @@ def run_extraction_pipeline(
         elif method == "evidence_first":
             result = evidence_first_extract(report_text, report_id)
             result = EvidenceValidator().validate_and_flag(result, report_text)
-            result = QADetector().run_full_qa(report_text, result)
+            document_data = report.get("processed_document")
+            document = ProcessedDocument.model_validate(document_data) if document_data else None
+            result = QADetector().run_full_qa(report_text, result, document)
         elif method == "ml":
             result = ml_extract(report_text, report_id)
             result = EvidenceValidator().validate_and_flag(result, report_text)
-            result = QADetector().run_full_qa(report_text, result)
+            document_data = report.get("processed_document")
+            document = ProcessedDocument.model_validate(document_data) if document_data else None
+            result = QADetector().run_full_qa(report_text, result, document)
         else:
             raise ExtractionPipelineError(f"Unsupported extraction method: {method}.")
 
         cancer_type = report.get("cancer_type")
         result.cancer_type = str(cancer_type) if cancer_type else None
+        result.model_version = _artifact_version(method)
+        result.source_report_digest = (
+            str(report.get("source_report_digest"))
+            if report.get("source_report_digest")
+            else "sha256:" + hashlib.sha256(report_text.encode("utf-8")).hexdigest()
+        )
+        if report.get("processed_document"):
+            result.document_provenance = ProcessedDocument.model_validate(
+                report["processed_document"]
+            ).provenance
+        page_ranges = report.get("page_ranges")
+        if isinstance(page_ranges, list):
+            for variable in result.variables:
+                for span in variable.evidence or []:
+                    span.page_number = page_for_offset(span.start_offset, page_ranges)
+            for issue in result.qa_issues:
+                for span in issue.evidence or []:
+                    span.page_number = page_for_offset(span.start_offset, page_ranges)
         return validate_result_contract(result)
     except ExtractionPipelineError:
         raise
@@ -91,4 +131,3 @@ def run_both_pipelines(report: Mapping[str, Any]) -> dict[str, ExtractionResult]
         "evidence_first": run_extraction_pipeline(report, "evidence_first"),
         "ml": run_extraction_pipeline(report, "ml"),
     }
-

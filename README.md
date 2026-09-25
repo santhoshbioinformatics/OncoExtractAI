@@ -6,7 +6,9 @@ OncoExtractAI-QA is a local, evidence-grounded review assistant for abstracting 
 
 ## Quick start
 
-Prerequisite: Python 3.10 or newer.
+Prerequisites: Python 3.10 or newer and local Tesseract OCR. On macOS install
+Tesseract with `brew install tesseract`; on Ubuntu use
+`sudo apt install tesseract-ocr`.
 
 ```bash
 python3 -m venv .venv
@@ -18,16 +20,42 @@ python -m streamlit run app.py
 
 On Windows PowerShell, activate the environment with `.venv\Scripts\Activate.ps1`.
 
-The application currently uses no environment variables, secrets, external APIs, databases, or paid services. An `.env.example` is therefore intentionally not included.
+Authentication is intentionally disabled for the current local research prototype.
+Run it only on a trusted machine or protected network; do not expose the Streamlit
+server directly to the public internet. Add organization-managed authentication
+before deployment or use with approved non-synthetic text.
 
 ## Review workflow
 
-1. Select a bundled synthetic report, or enter only text approved for local research use.
-2. Run baseline, evidence-first, or ML extraction.
-3. Review each proposed value, documentation status, and exact evidence span.
-4. Inspect missing, uncertain, conflicting, negated, or superseded documentation issues.
-5. Accept, correct, reject, or flag each field and record a reason when appropriate.
-6. Export the reviewed abstraction and its audit information as JSON or CSV.
+Completed reviews retain field-level provenance: extraction method and a hash-based
+implementation version, the SHA-256 source report digest, extraction/review timestamps,
+session-entered reviewer identity, original and corrected values, exact evidence offsets,
+and the review reason. Authentication is currently disabled, so reviewer identities are
+explicitly labeled unverified in the interface and exports.
+
+1. Add a bundled synthetic report, approved text, or an approved PDF (25 MB and 100 pages maximum).
+2. For PDFs, verify every page in the split OCR & text review. Native PDF text is preferred;
+   poor pages fall back to local Tesseract OCR. Abstraction remains locked until every page is accepted.
+3. Work through the filterable review queue by status, priority, method, and session-only assignment.
+4. Run baseline, evidence-first, or ML extraction on the accepted authoritative text.
+5. Review exception fields first in the split-screen report and decision workspace.
+6. Accept, correct, reject, or flag each field; drafts autosave within the current session.
+7. Complete the review, then export the full session or one reviewed case as JSON or CSV.
+
+PDF bytes, rendered page images, extracted text, and reviewer corrections are kept only
+in Streamlit session memory. The app does not infer metadata from filenames and does not
+send OCR content to a remote service. Clear or discard a document when finished, close the
+browser session on a shared workstation, and do not commit document artifacts.
+
+The empty workspace offers a one-click synthetic example and describes the next useful
+action at each stage. In Human Review, keyboard shortcuts support `A` accept, `C`
+correct, `F` flag, `J`/`K` next or previous field, `E` evidence focus, and
+`Cmd/Ctrl + Enter` complete review. Letter shortcuts are suppressed while typing.
+
+Synthetic evaluation is kept under the separate **Research tools** sidebar section so
+it does not compete with daily review. Because authentication is disabled, that section
+is only organizational in the local prototype; enforce authenticated role-based access
+before deployment.
 
 The evidence-first path is designed to abstain or request manual review when the report cannot support a reliable value. A human reviewer remains responsible for every accepted abstraction.
 
@@ -69,6 +97,12 @@ python scripts/validate_demo_data.py
 
 The dashboard compares the two extraction methods against the synthetic reference annotations. Results from eight handcrafted reports (32 fields) are useful for regression testing and workflow demonstration only. They are not estimates of clinical accuracy, should not be generalized beyond these fixtures, and should always display the label **Illustrative synthetic results** with their denominators.
 
+The same page reports session-based reviewer-efficiency measures after reviews are
+completed: median review time per report, field acceptance and correction rates,
+reviewer disagreement actions, clarification returns, and reviews completed without
+editing. Timing begins with the first changed reviewer decision and ends at completion.
+These workflow measures are descriptive and are not clinical-performance claims.
+
 The primary research metric is the unsupported extraction rate:
 
 ```text
@@ -87,6 +121,9 @@ Rates with a zero denominator are displayed and exported as `N/A`, never as a fa
 app.py                         Streamlit workspace and review flow
 src/schemas.py                 Validated extraction, evidence, QA, and review models
 src/report_input.py            Input normalization, validation, and direct-identifier checks
+src/pdf_processor.py           PDF validation, native extraction, page rendering, and routing
+src/ocr_service.py             Local-only Tesseract OCR adapter
+src/text_normalizer.py         Conservative text cleanup and transformation provenance
 src/workflow.py                Extraction, evidence validation, and QA orchestration
 src/extractor.py               Baseline and evidence-first extraction
 src/ml_model.py                Local TF-IDF + logistic regression extractor

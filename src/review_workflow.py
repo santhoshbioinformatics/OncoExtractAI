@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Literal
@@ -13,6 +14,7 @@ from .schemas import (
     CORE_VARIABLES,
     CoreVariableName,
     DocumentationStatus,
+    DocumentProvenance,
     EvidenceSpan,
     ExtractionResult,
     ReviewAction,
@@ -130,7 +132,16 @@ class ReviewSnapshot(BaseModel):
     review_id: str
     report_id: str
     method: Literal["baseline", "evidence_first", "ml"]
+    model_version: str = "unversioned"
+    source_report_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    extraction_timestamp: str | None = None
+    document_provenance: DocumentProvenance | None = None
+    reviewer_identity: str = Field(default="Unassigned", min_length=1)
+    reviewer_identity_verified: bool = False
     reviewed_at: str
+    review_started_at: str | None = None
+    review_duration_seconds: float | None = Field(default=None, ge=0)
+    returned_for_clarification: bool = False
     original_review_priority: ReviewPriority
     original_review_priority_reason: str
     review_priority: ReviewPriority
@@ -155,6 +166,11 @@ class AuditRecord(BaseModel):
     review_id: str
     report_id: str
     method: Literal["baseline", "evidence_first", "ml"]
+    model_version: str = "unversioned"
+    source_report_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    extraction_timestamp: str | None = None
+    reviewer_identity: str = Field(default="Unassigned", min_length=1)
+    reviewer_identity_verified: bool = False
     variable_name: CoreVariableName
     original_output: VariableExtraction
     reviewer_action: ReviewAction
@@ -522,6 +538,11 @@ def create_review_snapshot(
     report_text: str,
     overall_note: str = "",
     timestamp: str | None = None,
+    review_started_at: str | None = None,
+    review_duration_seconds: float | None = None,
+    returned_for_clarification: bool = False,
+    reviewer_identity: str = "Unassigned",
+    reviewer_identity_verified: bool = False,
 ) -> tuple[ReviewSnapshot, list[AuditRecord]]:
     """Validate decisions and create deep-copied snapshot and audit event values."""
 
@@ -530,6 +551,10 @@ def create_review_snapshot(
         raise ValueError("\n".join(errors))
 
     reviewed_at = timestamp or datetime.now(timezone.utc).isoformat()
+    source_report_digest = result.source_report_digest or (
+        "sha256:" + hashlib.sha256(report_text.encode("utf-8")).hexdigest()
+    )
+    extraction_timestamp = result.timestamp.isoformat() if result.timestamp else None
     review_id = f"REV-{uuid4().hex[:12].upper()}"
     fields: list[ReviewedField] = []
     records: list[AuditRecord] = []
@@ -597,6 +622,11 @@ def create_review_snapshot(
                 review_id=review_id,
                 report_id=result.report_id,
                 method=result.method,
+                model_version=result.model_version,
+                source_report_digest=source_report_digest,
+                extraction_timestamp=extraction_timestamp,
+                reviewer_identity=reviewer_identity.strip() or "Unassigned",
+                reviewer_identity_verified=reviewer_identity_verified,
                 variable_name=variable.variable_name,
                 original_output=variable.model_copy(deep=True),
                 reviewer_action=decision.action,
@@ -617,7 +647,19 @@ def create_review_snapshot(
         review_id=review_id,
         report_id=result.report_id,
         method=result.method,
+        model_version=result.model_version,
+        source_report_digest=source_report_digest,
+        extraction_timestamp=extraction_timestamp,
+        document_provenance=(
+            result.document_provenance.model_copy(deep=True)
+            if result.document_provenance else None
+        ),
+        reviewer_identity=reviewer_identity.strip() or "Unassigned",
+        reviewer_identity_verified=reviewer_identity_verified,
         reviewed_at=reviewed_at,
+        review_started_at=review_started_at,
+        review_duration_seconds=review_duration_seconds,
+        returned_for_clarification=returned_for_clarification,
         original_review_priority=result.review_priority,
         original_review_priority_reason=result.review_priority_reason,
         review_priority=reviewed_priority,

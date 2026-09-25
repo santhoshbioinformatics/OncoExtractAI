@@ -422,6 +422,7 @@ class EvidenceSpan(StrictModel):
     text: str = Field(..., min_length=1)
     start_offset: int = Field(..., ge=0)
     end_offset: int = Field(..., gt=0)
+    page_number: int | None = Field(default=None, ge=1)
 
     @model_validator(mode="after")
     def valid_character_span(self) -> "EvidenceSpan":
@@ -429,6 +430,70 @@ class EvidenceSpan(StrictModel):
             raise ValueError("end_offset must be greater than start_offset")
         if self.end_offset - self.start_offset != len(self.text):
             raise ValueError("offset span length must equal the evidence text length")
+        return self
+
+
+class TextTransformation(StrictModel):
+    """One conservative, reviewable text-normalization operation."""
+
+    transformation: str = Field(..., min_length=1)
+    count: int = Field(..., ge=1)
+    description: str = Field(..., min_length=1)
+
+
+class OCRQualityAssessment(StrictModel):
+    """Transparent page-level extraction quality assessment."""
+
+    label: Literal["Good", "Review recommended", "Poor"]
+    score: float = Field(..., ge=0, le=1)
+    reasons: list[str] = Field(default_factory=list)
+
+
+class ProcessedPage(StrictModel):
+    """Extracted and reviewer-controlled state for a single PDF page."""
+
+    page_number: int = Field(..., ge=1)
+    extraction_method: Literal["native_text", "ocr"]
+    raw_text: str = ""
+    normalized_text: str = ""
+    corrected_text: str | None = None
+    accepted: bool = False
+    character_count: int = Field(..., ge=0)
+    quality: OCRQualityAssessment
+    warning_flags: list[str] = Field(default_factory=list)
+    transformations: list[TextTransformation] = Field(default_factory=list)
+
+    @property
+    def authoritative_text(self) -> str:
+        return self.corrected_text if self.corrected_text is not None else self.raw_text
+
+
+class DocumentProvenance(StrictModel):
+    """Document-level provenance retained through extraction and review."""
+
+    source_report_digest: str = Field(..., pattern=r"^sha256:[0-9a-f]{64}$")
+    extraction_timestamp: datetime
+    processor_version: str = Field(..., min_length=1)
+    page_count: int = Field(..., ge=1)
+    native_text_pages: int = Field(..., ge=0)
+    ocr_pages: int = Field(..., ge=0)
+    reviewer_accepted_at: datetime | None = None
+
+
+class ProcessedDocument(StrictModel):
+    """Validated, page-aware PDF processing result."""
+
+    document_id: str = Field(..., pattern=r"^TCGA-PDF-[0-9A-F]{12}$")
+    pages: list[ProcessedPage] = Field(..., min_length=1)
+    provenance: DocumentProvenance
+
+    @model_validator(mode="after")
+    def coherent_pages(self) -> "ProcessedDocument":
+        expected = list(range(1, len(self.pages) + 1))
+        if [page.page_number for page in self.pages] != expected:
+            raise ValueError("processed pages must be sequential and one-indexed")
+        if self.provenance.page_count != len(self.pages):
+            raise ValueError("provenance page_count must match processed pages")
         return self
 
 
@@ -563,6 +628,7 @@ class QAIssueType(str, Enum):
     EVIDENCE_MISMATCH = "evidence_mismatch"
     OFFSET_MISMATCH = "offset_mismatch"
     MANUAL_REVIEW = "manual_review_required"
+    OCR_QUALITY = "ocr_quality"
 
 
 class QAIssue(StrictModel):
@@ -584,6 +650,9 @@ class ExtractionResult(StrictModel):
     report_id: str = Field(..., min_length=1)
     cancer_type: CancerType | None = None
     method: Literal["baseline", "evidence_first", "ml"]
+    model_version: str = Field(default="unversioned", min_length=1)
+    source_report_digest: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
+    document_provenance: DocumentProvenance | None = None
     variables: list[VariableExtraction] = Field(..., min_length=len(CORE_VARIABLES), max_length=len(CORE_VARIABLES))
     qa_issues: list[QAIssue] = Field(default_factory=list)
     manual_review_required: bool = False

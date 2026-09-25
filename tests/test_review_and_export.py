@@ -106,6 +106,7 @@ def test_reviewer_correction_creates_snapshot_and_append_only_audit_record() -> 
         decisions,
         report_text=REVIEW_REPORT,
         timestamp="2026-09-10T12:00:00+00:00",
+        reviewer_identity="Reviewer A",
     )
     corrected = next(field for field in snapshot.fields if field.variable_name == "tumor_size")
     corrected_event = next(item for item in audit if item.variable_name == "tumor_size")
@@ -119,6 +120,10 @@ def test_reviewer_correction_creates_snapshot_and_append_only_audit_record() -> 
     assert corrected_event.corrected_value == "4.0 cm"
     assert "4.0 cm" in corrected_event.resulting_evidence[0].text
     assert corrected_event.timestamp == "2026-09-10T12:00:00+00:00"
+    assert snapshot.reviewer_identity == "Reviewer A"
+    assert corrected_event.reviewer_identity == "Reviewer A"
+    assert corrected_event.source_report_digest.startswith("sha256:")
+    assert corrected_event.resulting_evidence[0].start_offset >= 0
 
     decisions["tumor_size"]["corrected_value"] = "changed later"
     assert corrected_event.corrected_value == "4.0 cm"
@@ -172,7 +177,9 @@ def test_correction_requires_nonempty_value() -> None:
         reason="Needs correction.",
     )
     with pytest.raises(ValueError, match="corrected value"):
-        create_review_snapshot(result, decisions, report_text=REVIEW_REPORT)
+        create_review_snapshot(
+            result, decisions, report_text=REVIEW_REPORT
+        )
 
 
 def test_correction_evidence_must_state_value_and_identify_one_exact_span() -> None:
@@ -287,7 +294,9 @@ def test_reject_or_flag_recomputes_residual_priority(
         reason="Reviewer cannot retain this proposed value.",
     )
 
-    snapshot, _ = create_review_snapshot(result, decisions, report_text=REVIEW_REPORT)
+    snapshot, _ = create_review_snapshot(
+        result, decisions, report_text=REVIEW_REPORT
+    )
     field = next(item for item in snapshot.fields if item.variable_name == "tumor_size")
     assert field.reviewed_status == expected_status
     assert snapshot.original_review_priority == "low"
@@ -336,7 +345,9 @@ def test_resolved_original_conflict_recomputes_priority_to_low() -> None:
         reason="Reviewer resolved the conflict to the amended measurement.",
     )
 
-    snapshot, _ = create_review_snapshot(result, decisions, report_text=REVIEW_REPORT)
+    snapshot, _ = create_review_snapshot(
+        result, decisions, report_text=REVIEW_REPORT
+    )
     assert snapshot.original_review_priority == "high"
     assert snapshot.review_priority == "low"
     assert "all four fields" in snapshot.review_priority_reason

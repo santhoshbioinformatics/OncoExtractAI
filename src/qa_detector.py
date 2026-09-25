@@ -11,6 +11,7 @@ from .schemas import (
     ExtractionResult,
     QAIssue,
     QAIssueType,
+    ProcessedDocument,
     VariableExtraction,
 )
 
@@ -32,6 +33,33 @@ class QADetector:
             if variable.variable_name == "pathological_n_category":
                 issues.extend(self._check_nodal_consistency(variable, report_text))
         return issues
+
+    @staticmethod
+    def detect_document_issues(document: ProcessedDocument | None) -> list[QAIssue]:
+        """Surface OCR uncertainty as report-level QA, without clinical inference."""
+
+        if document is None:
+            return []
+        poor = [page.page_number for page in document.pages if page.quality.label == "Poor"]
+        review = [
+            page.page_number for page in document.pages
+            if page.quality.label == "Review recommended"
+        ]
+        if poor:
+            return [QAIssue(
+                issue_type=QAIssueType.OCR_QUALITY,
+                description=f"Poor text extraction quality on page(s): {', '.join(map(str, poor))}.",
+                severity="high",
+                suggestion="Compare the accepted text against each page image before reviewing fields.",
+            )]
+        if review:
+            return [QAIssue(
+                issue_type=QAIssueType.OCR_QUALITY,
+                description=f"Text extraction should be checked on page(s): {', '.join(map(str, review))}.",
+                severity="medium",
+                suggestion="Verify the accepted text against the source page.",
+            )]
+        return []
 
     @staticmethod
     def _span(report_text: str, start: int, end: int) -> EvidenceSpan:
@@ -240,10 +268,11 @@ class QADetector:
         self,
         report_text: str,
         result: ExtractionResult,
+        document: ProcessedDocument | None = None,
     ) -> ExtractionResult:
         """Add non-duplicate QA issues and synchronize priority and explanation."""
 
-        detected = self.detect_issues(report_text, result)
+        detected = self.detect_issues(report_text, result) + self.detect_document_issues(document)
         existing = {(issue.issue_type, issue.variable_name) for issue in result.qa_issues}
         for issue in detected:
             key = (issue.issue_type, issue.variable_name)
