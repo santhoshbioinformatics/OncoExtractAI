@@ -31,6 +31,7 @@ from .extractor import (
     _negation_evidence,
     _normalize_value,
     _resolve_current_matches,
+    evidence_first_extract,
 )
 from .schemas import (
     CORE_VARIABLES,
@@ -190,7 +191,7 @@ class PathologyMLExtractor:
     def __init__(self, pipelines: dict[str, Any] | None = None, metadata: dict[str, Any] | None = None):
         self.pipelines = pipelines or {}
         self.metadata = metadata or {
-            "model_name": "pathology_tfidf_logreg_v1",
+            "model_name": "pathology_hybrid_evidence_tfidf_v2",
             "framework": "scikit-learn",
             "variables": list(CORE_VARIABLES),
         }
@@ -639,12 +640,32 @@ def ml_extract(
 
     extractor = model or get_default_ml_extractor()
     predictions = extractor.predict_fields(report_text)
+    # The classifier is trained on a deliberately small synthetic cohort and
+    # cannot enumerate every future measurement, TNM category, or wording as a
+    # closed class. Generate values from explicit report evidence first, then
+    # retain the model output as contextual provenance rather than allowing an
+    # unseen-but-documented value to be withheld.
+    candidate_result = evidence_first_extract(report_text, report_id)
+    candidates = {
+        variable.variable_name: variable for variable in candidate_result.variables
+    }
     variables: list[VariableExtraction] = []
-    issues: list[QAIssue] = []
+    issues: list[QAIssue] = [issue.model_copy(deep=True) for issue in candidate_result.qa_issues]
     for prediction in predictions:
-        variable, variable_issues = _variable_from_prediction(prediction, report_text)
+        candidate = candidates[prediction.variable_name].model_copy(deep=True)
+        if candidate.extracted_value is None:
+            model_note = (
+                "No evidence-anchored candidate was found; a classifier-only "
+                f"suggestion was withheld (confidence={prediction.confidence:.2f})."
+            )
+        else:
+            model_note = (
+                "Evidence-anchored hybrid candidate selected "
+                f"(classifier confidence={prediction.confidence:.2f})."
+            )
+        candidate.notes = f"{model_note} {candidate.notes or ''}".strip()
+        variable = candidate
         variables.append(variable)
-        issues.extend(variable_issues)
     priority, reason = _issue_priority(issues)
     return ExtractionResult(
         report_id=report_id,

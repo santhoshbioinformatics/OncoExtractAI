@@ -64,6 +64,19 @@ class TestEvidenceValidator(unittest.TestCase):
         issues = self.validator.validate(result_with(target), self.report)
         self.assertFalse(any(issue.severity == "critical" for issue in issues))
 
+    def test_tcga_multidimensional_tumor_size_supports_greatest_dimension(self):
+        report = "BASALOID SQUAMOUS CELL CARCINOMA, TUMOR SIZE 3.3 X 2.5 CM."
+        target = VariableExtraction(
+            variable_name="tumor_size",
+            extracted_value="3.3 cm",
+            documentation_status=DocumentationStatus.SUPPORTED,
+            evidence=[span(report, "TUMOR SIZE 3.3 X 2.5 CM")],
+        )
+
+        issues = self.validator.validate(result_with(target), report)
+
+        self.assertFalse(any(issue.severity == "critical" for issue in issues))
+
     def test_missing_evidence_is_detected_even_on_malformed_construct(self):
         valid_target = VariableExtraction(
             variable_name="tumor_size",

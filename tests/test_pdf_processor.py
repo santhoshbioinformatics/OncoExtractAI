@@ -8,10 +8,14 @@ from PIL import Image, ImageDraw
 
 from src.pdf_processor import (
     PDFProcessingError,
+    assess_text_quality,
     assemble_accepted_text,
+    merge_reprocessed_document,
     process_pdf,
+    render_pdf_page,
     validate_pdf_upload,
 )
+from src.ocr_service import OCRServiceError
 from src.schemas import ProcessedDocument
 
 
@@ -91,6 +95,18 @@ def test_scanned_pdf_uses_ocr() -> None:
     assert result.pages[0].character_count > 20
 
 
+def test_truncated_synoptic_staging_text_requires_review() -> None:
+    text = (
+        "SYNOPTIC REPORT - LUNG\n" + "Readable pathology content. " * 12
+        + "\nLymph Node Involvement:"
+    )
+
+    quality = assess_text_quality(text)
+
+    assert quality.label == "Review recommended"
+    assert any("staging label" in reason for reason in quality.reasons)
+
+
 def test_mixed_pdf_selects_ocr_only_for_image_page() -> None:
     native = fitz.open(stream=_searchable_pdf("A" * 250), filetype="pdf")
     scanned = fitz.open(stream=_scanned_pdf("SCANNED PAGE WITH PATHOLOGY TEXT"), filetype="pdf")
@@ -112,3 +128,77 @@ def test_force_ocr_and_acceptance_gate() -> None:
     text, ranges = assemble_accepted_text(result)
     assert text == "Reviewer corrected authoritative text."
     assert ranges == [(1, 0, len(text))]
+
+
+def test_explicit_blank_page_is_accepted_and_excluded() -> None:
+    result = process_pdf(
+        "case.pdf",
+        _searchable_pdf("A" * 250, "B" * 250, "C" * 250),
+    )
+    result.pages[0].accepted = True
+    result.pages[1].accepted = True
+    result.pages[1].excluded_as_blank = True
+    result.pages[2].accepted = True
+    text, ranges = assemble_accepted_text(result)
+    assert "A" in text
+    assert "B" not in text
+    assert "C" in text
+    assert [page_number for page_number, _, _ in ranges] == [1, 3]
+
+
+def test_all_blank_pages_are_rejected() -> None:
+    result = process_pdf("case.pdf", _searchable_pdf("A" * 250))
+    result.pages[0].accepted = True
+    result.pages[0].excluded_as_blank = True
+    with pytest.raises(PDFProcessingError, match="At least one"):
+        assemble_accepted_text(result)
+
+
+def test_reprocessing_preserves_correction_but_requires_reverification() -> None:
+    payload = _searchable_pdf("A" * 250, "B" * 250)
+    original = process_pdf("case.pdf", payload)
+    original.pages[0].corrected_text = "Reviewer corrected authoritative page text."
+    original.pages[0].accepted = True
+    refreshed = process_pdf("case.pdf", payload, force_ocr_pages=[1])
+    merged = merge_reprocessed_document(original, refreshed, [1])
+    assert merged.pages[0].corrected_text == "Reviewer corrected authoritative page text."
+    assert merged.pages[0].accepted is False
+    assert merged.pages[1] == original.pages[1]
+
+
+def test_render_rotation_changes_page_orientation() -> None:
+    payload = _searchable_pdf("ROTATION TEST " * 30)
+    normal = Image.open(BytesIO(render_pdf_page(payload, 1, dpi=72, rotation_degrees=0)))
+    rotated = Image.open(BytesIO(render_pdf_page(payload, 1, dpi=72, rotation_degrees=90)))
+    assert normal.size == tuple(reversed(rotated.size))
+
+
+def test_ocr_settings_are_forwarded_to_service() -> None:
+    class RecordingOCR:
+        def __init__(self) -> None:
+            self.arguments = None
+
+        def extract_text(self, image_bytes: bytes, **kwargs: object) -> str:
+            self.arguments = kwargs
+            return "Readable OCR pathology report text with more than forty characters."
+
+    service = RecordingOCR()
+    result = process_pdf(
+        "scan.pdf", _scanned_pdf("SCAN"), ocr_service=service,
+        ocr_language="eng", ocr_page_segmentation=11, auto_orient=True,
+        page_rotations={1: 90},
+    )
+    assert service.arguments == {
+        "language": "eng", "page_segmentation": 11, "auto_orient": True,
+    }
+    assert result.pages[0].rotation_degrees == 90
+    assert result.pages[0].ocr_page_segmentation == 11
+
+
+def test_ocr_failure_becomes_safe_pdf_error() -> None:
+    class FailingOCR:
+        def extract_text(self, image_bytes: bytes, **kwargs: object) -> str:
+            raise OCRServiceError("Local OCR dependency is unavailable.")
+
+    with pytest.raises(PDFProcessingError, match="Local OCR dependency"):
+        process_pdf("scan.pdf", _scanned_pdf("SCAN"), ocr_service=FailingOCR())

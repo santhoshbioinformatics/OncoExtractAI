@@ -170,6 +170,28 @@ class TestQADetector(unittest.TestCase):
         twice = self.detector.run_full_qa(report, once)
         self.assertEqual(len(twice.qa_issues), count)
 
+    def test_synoptic_report_with_missing_stage_is_flagged_as_extraction_gap(self):
+        report = (
+            "SYNOPTIC REPORT - LUNG\n"
+            "Tumor Size: 3.3 cm\n"
+            "Lymph Node Involvement:\n"
+            "Seven nodes negative for tumor (0/7)."
+        )
+        result = evidence_first_extract(report, "SYNOPTIC-GAP")
+
+        updated = self.detector.run_full_qa(report, result)
+        stage_gaps = [
+            issue
+            for issue in updated.qa_issues
+            if issue.issue_type == QAIssueType.OCR_QUALITY
+            and issue.variable_name
+            in {"pathological_t_category", "pathological_n_category"}
+        ]
+
+        self.assertEqual(len(stage_gaps), 2)
+        self.assertTrue(all(issue.severity == "high" for issue in stage_gaps))
+        self.assertTrue(all("Do not derive" in issue.suggestion for issue in stage_gaps))
+
 
 if __name__ == "__main__":
     unittest.main()

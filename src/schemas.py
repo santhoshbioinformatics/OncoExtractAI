@@ -73,10 +73,16 @@ def _value_evidence_pattern(
     normalized_value = re.sub(r"\s+", " ", value.casefold()).strip()
     if variable_name == "tumor_size":
         number = re.search(r"\d+(?:\.\d+)?", normalized_value)
+        if not number:
+            return None
+        value_number = re.escape(number.group(0))
+        # Synoptic reports commonly state the greatest dimension as the first
+        # number in a multi-dimensional measurement (for example,
+        # ``3.3 x 2.5 cm``). The canonical value remains ``3.3 cm``, while the
+        # exact evidence must retain the original report wording.
         return (
-            rf"(?<![\d.]){re.escape(number.group(0))}\s*cm\b"
-            if number
-            else None
+            rf"(?<![\d.]){value_number}(?:\s*cm\b|"
+            rf"(?:\s*[x×]\s*\d+(?:\.\d+)?){{1,2}}\s*cm\b)"
         )
     if variable_name in {"pathological_t_category", "pathological_n_category"}:
         return rf"\b{re.escape(normalized_value)}\b"
@@ -162,6 +168,9 @@ def evidence_text_supports_value(
             rf"\b(?:tumou?r|mass|lesion|carcinoma)\s+(?:is\s+|measur\w*\s+)?{candidate_pattern}",
             rf"\b(?:amended|revised|estimated|maximum)\s+size\b[^.\n]{{0,50}}{candidate_pattern}",
             rf"\bsize\s*(?::|is)?\s*(?:approximately\s+|about\s+)?{candidate_pattern}",
+            rf"\bgreatest\s+dimension(?:\s+of\s+(?:the\s+)?tumou?r)?\s*(?::|is|=)?\s*{candidate_pattern}",
+            rf"\bgreatest\s+diameter(?:\s+of\s+(?:the\s+)?tumou?r)?\s*(?::|is|=)?\s*{candidate_pattern}",
+            rf"\b(?:size|dimension)\s+of\s+(?:invasive\s+)?(?:carcinoma|tumou?r)\s*(?::|is|=)?\s*{candidate_pattern}",
             rf"{candidate_pattern}[^.\n]{{0,35}}\b(?:greatest\s+dimension|tumou?r|mass|lesion)\b",
             rf"\b(?:gross|microscopic|synoptic|narrative)\s+(?:section\s+)?records\s+{candidate_pattern}",
         )
@@ -458,6 +467,10 @@ class ProcessedPage(StrictModel):
     normalized_text: str = ""
     corrected_text: str | None = None
     accepted: bool = False
+    excluded_as_blank: bool = False
+    rotation_degrees: Literal[0, 90, 180, 270] = 0
+    ocr_language: str | None = None
+    ocr_page_segmentation: int | None = Field(default=None, ge=3, le=13)
     character_count: int = Field(..., ge=0)
     quality: OCRQualityAssessment
     warning_flags: list[str] = Field(default_factory=list)
@@ -465,7 +478,15 @@ class ProcessedPage(StrictModel):
 
     @property
     def authoritative_text(self) -> str:
+        if self.excluded_as_blank:
+            return ""
         return self.corrected_text if self.corrected_text is not None else self.raw_text
+
+    @model_validator(mode="after")
+    def coherent_review_state(self) -> "ProcessedPage":
+        if self.excluded_as_blank and not self.accepted:
+            raise ValueError("a page excluded as blank must be explicitly accepted")
+        return self
 
 
 class DocumentProvenance(StrictModel):

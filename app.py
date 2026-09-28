@@ -35,7 +35,6 @@ from src.exporter import (
 )
 from src.report_input import (
     ReportInputError,
-    decode_uploaded_text,
     find_direct_identifier_labels,
     prepare_report,
     sanitize_report_text,
@@ -43,8 +42,16 @@ from src.report_input import (
 from src.pdf_processor import (
     PDFProcessingError,
     assemble_accepted_text,
+    merge_reprocessed_document,
     process_pdf,
     render_pdf_page,
+)
+from src.ocr_service import OCRService
+from src.upload_processor import (
+    UploadInspection,
+    UploadProcessingError,
+    extract_non_pdf_text,
+    inspect_upload,
 )
 from src.review_workflow import (
     AuditRecord,
@@ -113,6 +120,29 @@ st.markdown(
     [data-testid="stSidebar"] hr { border-color: rgba(255,255,255,.18); }
     [data-testid="stSidebar"] .stAlert p,
     [data-testid="stSidebar"] .stCaption p { color: inherit; }
+
+    /* Keep sidebar expanders on a dark surface so light sidebar text stays legible. */
+    [data-testid="stSidebar"] [data-testid="stExpander"] {
+        background: #183b56;
+        border: 1px solid #45657c;
+        border-radius: 12px;
+        overflow: hidden;
+    }
+    [data-testid="stSidebar"] [data-testid="stExpander"] summary {
+        background: #183b56;
+        min-height: 48px;
+    }
+    [data-testid="stSidebar"] [data-testid="stExpanderDetails"] {
+        background: #15354e;
+        border-top: 1px solid #45657c;
+        padding: .85rem .9rem 1rem;
+    }
+    [data-testid="stSidebar"] [data-testid="stExpanderDetails"]
+    [data-testid="stVerticalBlock"] { gap: .75rem; }
+    [data-testid="stSidebar"] [data-testid="stExpanderDetails"] .stCaption p {
+        color: #d5e2ea !important;
+        line-height: 1.5;
+    }
     
     /* Profile card in sidebar */
     [data-testid="stSidebar"] .sidebar-profile {
@@ -313,8 +343,41 @@ st.markdown(
     /* Streamlit component overrides */
     [data-testid="stDataFrame"] { border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
     [data-testid="stExpander"] { background: var(--paper); border-color: var(--line); border-radius: var(--radius); }
-    [data-testid="stTabs"] [data-baseweb="tab-list"] { gap: .25rem; overflow-x: auto; }
-    [data-testid="stTabs"] [data-baseweb="tab"] { min-height: 44px; white-space: nowrap; }
+    [data-testid="stTabs"] [data-baseweb="tab-list"] {
+        background: #eef4f6;
+        border: 1px solid #d8e3e8;
+        border-radius: 12px;
+        gap: .65rem;
+        overflow-x: auto;
+        padding: .45rem;
+    }
+    [data-testid="stTabs"] [data-baseweb="tab"] {
+        background: #ffffff;
+        border: 1px solid #d3dfe5;
+        border-radius: 8px;
+        color: var(--navy);
+        font-weight: 650;
+        min-height: 44px;
+        padding: .55rem 1rem;
+        transition: background-color .15s ease, border-color .15s ease, box-shadow .15s ease;
+        white-space: nowrap;
+    }
+    [data-testid="stTabs"] [data-baseweb="tab"]:hover {
+        background: #f7fbfb;
+        border-color: #82b6bb;
+    }
+    [data-testid="stTabs"] [data-baseweb="tab"][aria-selected="true"] {
+        background: #dff3f2;
+        border-color: var(--teal);
+        box-shadow: 0 1px 3px rgba(20, 66, 78, .12);
+        color: #0b6871;
+    }
+    [data-testid="stTabs"] [data-baseweb="tab"]:focus-visible {
+        outline: 3px solid #18a3ad;
+        outline-offset: 2px;
+    }
+    [data-testid="stTabs"] [data-baseweb="tab-highlight"],
+    [data-testid="stTabs"] [data-baseweb="tab-border"] { display: none; }
     div[data-testid="stButton"] button, div[data-testid="stDownloadButton"] button {
         border-radius: 8px; min-height: 40px; font-weight: 650;
     }
@@ -361,7 +424,7 @@ DAILY_NAVIGATION = ("Workspace", "Comparison", "Audit & Export")
 METHOD_LABELS = {
     "evidence_first": "Evidence-first QA",
     "baseline": "Conventional baseline",
-    "ml": "ML model (TF-IDF + logistic regression)",
+    "ml": "Hybrid ML + evidence validation",
 }
 ACTION_OPTIONS = (
     ReviewAction.PENDING.value,
@@ -441,6 +504,12 @@ def _content_digest(content: str | bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _format_file_size(size_bytes: int) -> str:
+    if size_bytes >= 1024 * 1024:
+        return f"{size_bytes / (1024 * 1024):.1f} MB"
+    return f"{size_bytes / 1024:.1f} KB"
+
+
 def _purge_retired_loader_state() -> None:
     """Remove values belonging to loader widgets that are no longer rendered."""
     current_keys = {_loader_widget_key(base) for base in SENSITIVE_LOADER_WIDGETS}
@@ -459,6 +528,7 @@ def _rotate_sensitive_loader_state() -> None:
     st.session_state.loader_version = int(st.session_state.loader_version) + 1
     st.session_state.paste_approval_digest = None
     st.session_state.upload_approval_digest = None
+    st.session_state.upload_inspections = {}
 
 
 def _revoke_paste_approval(version: int) -> None:
@@ -498,6 +568,11 @@ def _load_pasted_from_state(version: int) -> None:
 def _revoke_upload_approval(version: int) -> None:
     st.session_state[_loader_widget_key("upload_approved", version)] = False
     st.session_state.upload_approval_digest = None
+
+
+def _clear_selected_upload() -> None:
+    """Retire the current uploader widget and its content-bound approval."""
+    _rotate_sensitive_loader_state()
 
 
 def _capture_upload_approval(version: int) -> None:
@@ -541,6 +616,10 @@ def _initialize_state() -> None:
         "upload_approval_digest": None,
         "pending_pdf_documents": {}, "pending_pdf_payloads": {},
         "pdf_active_page": {}, "pdf_editor_versions": {},
+        "pdf_review_errors": {},
+        "pdf_render_cache": {}, "pdf_ocr_settings": {},
+        "pdf_large_preview": {},
+        "upload_inspections": {},
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -822,6 +901,152 @@ def _clear_pending_pdf(document_id: str) -> None:
     st.session_state.pending_pdf_payloads.pop(document_id, None)
     st.session_state.pdf_active_page.pop(document_id, None)
     st.session_state.pdf_editor_versions.pop(document_id, None)
+    st.session_state.pdf_review_errors.pop(document_id, None)
+    st.session_state.pdf_ocr_settings.pop(document_id, None)
+    st.session_state.pdf_large_preview.pop(document_id, None)
+    for key in [
+        key for key in st.session_state.pdf_render_cache
+        if isinstance(key, tuple) and key[0] == document_id
+    ]:
+        st.session_state.pdf_render_cache.pop(key, None)
+    sensitive_prefixes = (
+        "pdf_text_", "pdf_page_", "ocr_language_", "ocr_layout_",
+        "pdf_preview_dpi_", "ocr_auto_orient_", "pdf_large_preview_",
+    )
+    for key in list(st.session_state):
+        if isinstance(key, str) and document_id in key and key.startswith(sensitive_prefixes):
+            del st.session_state[key]
+
+
+def _discard_pending_pdf(document_id: str) -> None:
+    _clear_pending_pdf(document_id)
+    _rotate_sensitive_loader_state()
+
+
+def _pdf_page_status(page: Any) -> str:
+    if page.excluded_as_blank:
+        return "✓ Blank"
+    if page.accepted:
+        return "✓ Accepted"
+    if page.quality.label == "Poor":
+        return "× Poor"
+    if page.quality.label == "Review recommended":
+        return "! Review"
+    return "○ Not reviewed"
+
+
+def _first_priority_pdf_page(document: ProcessedDocument) -> int:
+    for label in ("Poor", "Review recommended"):
+        for page in document.pages:
+            if not page.accepted and page.quality.label == label:
+                return page.page_number
+    return next(
+        (page.page_number for page in document.pages if not page.accepted), 1
+    )
+
+
+def _cached_pdf_page_image(
+    document_id: str,
+    payload: bytes,
+    page_number: int,
+    dpi: int,
+    rotation_degrees: int,
+) -> bytes:
+    key = (document_id, page_number, dpi, rotation_degrees)
+    cache = st.session_state.pdf_render_cache
+    if key not in cache:
+        cache[key] = render_pdf_page(
+            payload, page_number, dpi=dpi, rotation_degrees=rotation_degrees
+        )
+        while len(cache) > 48:
+            cache.pop(next(iter(cache)))
+    return cache[key]
+
+
+def _go_to_pdf_page(document_id: str, page_number: int) -> None:
+    st.session_state.pdf_active_page[document_id] = page_number
+    st.session_state[f"pdf_page_{document_id}"] = page_number
+
+
+def _continue_pdf_document(
+    document_id: str, cancer_type: str | None, approved: bool
+) -> None:
+    document = ProcessedDocument.model_validate(
+        st.session_state.pending_pdf_documents[document_id]
+    )
+    if cancer_type not in {"LUAD", "LUSC"}:
+        st.session_state.pdf_review_errors[document_id] = (
+            "Select LUAD or LUSC before continuing to abstraction."
+        )
+        return
+    try:
+        authoritative_text, page_ranges = assemble_accepted_text(document)
+        prepared = prepare_report(
+            authoritative_text, source="uploaded", approved=approved,
+            report_id=document.document_id,
+            description="Approved PDF pathology report",
+            cancer_type=cancer_type,
+        )
+    except (PDFProcessingError, ReportInputError) as error:
+        st.session_state.pdf_review_errors[document_id] = str(error)
+        return
+    document.provenance.reviewer_accepted_at = datetime.now(timezone.utc)
+    prepared["source_report_digest"] = document.provenance.source_report_digest
+    prepared["processed_document"] = document.model_dump(mode="json")
+    prepared["page_ranges"] = page_ranges
+    _clear_pending_pdf(document_id)
+    _load_prepared_report(prepared)
+
+
+def _accept_pdf_page_and_advance(
+    document_id: str, page_number: int, editor_key: str,
+    cancer_type: str | None, approved: bool,
+) -> None:
+    """Accept the displayed text and move directly to the next PDF page."""
+
+    document = ProcessedDocument.model_validate(
+        st.session_state.pending_pdf_documents[document_id]
+    )
+    edited_text = str(st.session_state.get(editor_key, ""))
+    try:
+        accepted_text = sanitize_report_text(edited_text)
+    except ReportInputError as error:
+        st.session_state.pdf_review_errors[document_id] = str(error)
+        return
+
+    page = document.pages[page_number - 1]
+    page.corrected_text = accepted_text
+    page.excluded_as_blank = False
+    page.accepted = True
+    st.session_state.pending_pdf_documents[document_id] = document.model_dump(mode="json")
+    st.session_state.pdf_review_errors.pop(document_id, None)
+
+    unaccepted = [item.page_number for item in document.pages if not item.accepted]
+    if not unaccepted:
+        _continue_pdf_document(document_id, cancer_type, approved)
+        return
+    following = [number for number in unaccepted if number > page_number]
+    _go_to_pdf_page(document_id, following[0] if following else unaccepted[0])
+
+
+def _mark_pdf_page_blank_and_advance(
+    document_id: str, page_number: int, cancer_type: str | None, approved: bool
+) -> None:
+    document = ProcessedDocument.model_validate(
+        st.session_state.pending_pdf_documents[document_id]
+    )
+    page = document.pages[page_number - 1]
+    page.corrected_text = None
+    page.accepted = True
+    page.excluded_as_blank = True
+    st.session_state.pending_pdf_documents[document_id] = document.model_dump(mode="json")
+    st.session_state.pdf_review_errors.pop(document_id, None)
+    unaccepted = [item.page_number for item in document.pages if not item.accepted]
+    if not unaccepted:
+        _continue_pdf_document(document_id, cancer_type, approved)
+        return
+    following = [number for number in unaccepted if number > page_number]
+    _go_to_pdf_page(document_id, following[0] if following else unaccepted[0])
 
 
 def _commit_report(report: dict[str, Any]) -> None:
@@ -1060,88 +1285,9 @@ def _render_sidebar() -> str:
             _request_report_change(report_id=selected_id)
         result_count = len(st.session_state.extraction_results.get(active_id, {}))
         st.sidebar.caption(f"{len(reports)} in session · {result_count}/3 methods run")
-    else:
-        st.sidebar.info("Start in Workspace to load a report.", icon=":material/info:")
     st.sidebar.warning("Research prototype · Not for clinical use")
     st.sidebar.caption(":material/computer: Local Streamlit session")
     return page
-
-
-def _extract_text_from_pdf(file_bytes: bytes) -> str:
-    """Extract text from a PDF file."""
-    try:
-        import PyPDF2
-        from io import BytesIO
-        reader = PyPDF2.PdfReader(BytesIO(file_bytes))
-        text_parts = []
-        for page in reader.pages:
-            page_text = page.extract_text()
-            if page_text:
-                text_parts.append(page_text)
-        return "\n\n".join(text_parts) if text_parts else ""
-    except ImportError:
-        raise ReportInputError(
-            "PyPDF2 is not installed. Install it with: pip install PyPDF2"
-        )
-    except Exception as e:
-        raise ReportInputError(f"Failed to extract text from PDF: {e}")
-
-
-def _extract_text_from_docx(file_bytes: bytes) -> str:
-    """Extract text from a Word document (.docx)."""
-    try:
-        import docx
-        from io import BytesIO
-        doc = docx.Document(BytesIO(file_bytes))
-        text_parts = [paragraph.text for paragraph in doc.paragraphs if paragraph.text.strip()]
-        return "\n\n".join(text_parts) if text_parts else ""
-    except ImportError:
-        raise ReportInputError(
-            "python-docx is not installed. Install it with: pip install python-docx"
-        )
-    except Exception as e:
-        raise ReportInputError(f"Failed to extract text from document: {e}")
-
-
-def _extract_text_from_image(file_bytes: bytes) -> str:
-    """Extract text from an image file using OCR (Tesseract)."""
-    try:
-        import pytesseract
-        from PIL import Image
-        from io import BytesIO
-        image = Image.open(BytesIO(file_bytes))
-        text = pytesseract.image_to_string(image)
-        return text.strip() if text.strip() else ""
-    except ImportError:
-        raise ReportInputError(
-            "OCR dependencies are not installed. Install with: "
-            "pip install Pillow pytesseract\n"
-            "You also need Tesseract OCR installed on your system:\n"
-            "  macOS: brew install tesseract\n"
-            "  Ubuntu: sudo apt install tesseract-ocr"
-        )
-    except Exception as e:
-        raise ReportInputError(f"Failed to extract text from image (OCR): {e}")
-
-
-def _extract_text_from_file(filename: str, file_bytes: bytes) -> str:
-    """Extract text from a file based on its extension."""
-    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
-    if ext == "pdf":
-        return _extract_text_from_pdf(file_bytes)
-    elif ext == "docx":
-        return _extract_text_from_docx(file_bytes)
-    elif ext in ("jpg", "jpeg", "png"):
-        return _extract_text_from_image(file_bytes)
-    else:
-        # Fallback: try to decode as plain text
-        try:
-            return file_bytes.decode("utf-8")
-        except UnicodeDecodeError:
-            raise ReportInputError(
-                f"Unsupported file format: .{ext}. "
-                "Supported formats: .txt, .pdf, .docx, .jpg, .jpeg, .png"
-            )
 
 
 def _load_prepared_report(prepared: dict[str, Any]) -> None:
@@ -1171,7 +1317,9 @@ def _try_synthetic_example() -> None:
         _load_prepared_report(prepared)
 
 
-def _render_pdf_text_review(document_id: str, cancer_type: str, approved: bool) -> None:
+def _render_pdf_text_review(
+    document_id: str, cancer_type: str | None, approved: bool
+) -> None:
     """Render the gated page-by-page OCR and text acceptance stage."""
 
     document = ProcessedDocument.model_validate(
@@ -1188,23 +1336,126 @@ def _render_pdf_text_review(document_id: str, cancer_type: str, approved: bool) 
         f"{document.document_id} · {accepted_count}/{len(document.pages)} pages accepted · "
         f"{document.provenance.native_text_pages} native / {document.provenance.ocr_pages} OCR"
     )
+    st.progress(
+        accepted_count / len(document.pages),
+        text=f"{accepted_count} of {len(document.pages)} pages reviewed",
+    )
+    if st.session_state.pdf_review_errors.get(document_id):
+        st.error(st.session_state.pdf_review_errors[document_id])
     page_number = st.selectbox(
         "Page", list(range(1, len(document.pages) + 1)), index=active_page - 1,
-        format_func=lambda number: f"Page {number}", key=f"pdf_page_{document_id}",
+        format_func=lambda number: (
+            f"Page {number} · {_pdf_page_status(document.pages[number - 1])}"
+        ),
+        key=f"pdf_page_{document_id}",
     )
     if page_number != active_page:
         st.session_state.pdf_active_page[document_id] = page_number
         st.rerun()
 
+    settings = st.session_state.pdf_ocr_settings.setdefault(
+        document_id,
+        {"language": "eng", "page_segmentation": 6, "auto_orient": True, "preview_dpi": 150},
+    )
+    with st.expander("OCR and page display settings", icon=":material/tune:"):
+        languages = OCRService.available_languages()
+        if settings["language"] not in languages:
+            settings["language"] = languages[0]
+        setting_cols = st.columns(3)
+        with setting_cols[0]:
+            settings["language"] = st.selectbox(
+                "OCR language", languages,
+                index=languages.index(settings["language"]),
+                key=f"ocr_language_{document_id}",
+            )
+        psm_options = {
+            "Automatic layout": 3,
+            "Multi-column text": 4,
+            "Uniform text block": 6,
+            "Sparse text": 11,
+        }
+        with setting_cols[1]:
+            selected_layout = st.selectbox(
+                "Page layout", list(psm_options),
+                index=list(psm_options.values()).index(settings["page_segmentation"]),
+                key=f"ocr_layout_{document_id}",
+            )
+            settings["page_segmentation"] = psm_options[selected_layout]
+        with setting_cols[2]:
+            settings["preview_dpi"] = st.select_slider(
+                "Preview resolution", options=[100, 150, 200, 250],
+                value=settings["preview_dpi"],
+                format_func=lambda value: f"{value} DPI",
+                key=f"pdf_preview_dpi_{document_id}",
+            )
+        settings["auto_orient"] = st.toggle(
+            "Detect text orientation when rerunning OCR",
+            value=bool(settings["auto_orient"]),
+            key=f"ocr_auto_orient_{document_id}",
+        )
+        st.caption(
+            "These controls affect the next OCR retry. Existing reviewer corrections are retained "
+            "and the affected page must be verified again."
+        )
+
+    preview = _cached_pdf_page_image(
+        document_id, payload, active_page, int(settings["preview_dpi"]),
+        page.rotation_degrees,
+    )
+    large_preview = st.toggle(
+        "Large source preview", value=bool(st.session_state.pdf_large_preview.get(document_id, False)),
+        key=f"pdf_large_preview_{document_id}",
+    )
+    st.session_state.pdf_large_preview[document_id] = large_preview
+    if large_preview:
+        st.image(
+            preview,
+            caption=f"Source page {active_page} · {page.rotation_degrees}° rotation",
+            width="stretch",
+        )
+
     left, right = st.columns([1, 1], gap="large")
     with left:
-        st.image(render_pdf_page(payload, active_page), caption=f"Source page {active_page}", width="stretch")
+        st.image(
+            preview,
+            caption=f"Source page {active_page} · {page.rotation_degrees}° rotation",
+            width="stretch",
+        )
+        with st.container(horizontal=True):
+            if st.button(
+                "Rotate left", icon=":material/rotate_left:",
+                key=f"rotate_left_{document_id}_{active_page}",
+            ):
+                page.rotation_degrees = (page.rotation_degrees - 90) % 360
+                if not page.excluded_as_blank:
+                    page.accepted = False
+                st.session_state.pending_pdf_documents[document_id] = document.model_dump(mode="json")
+                st.rerun()
+            if st.button(
+                "Rotate right", icon=":material/rotate_right:",
+                key=f"rotate_right_{document_id}_{active_page}",
+            ):
+                page.rotation_degrees = (page.rotation_degrees + 90) % 360
+                if not page.excluded_as_blank:
+                    page.accepted = False
+                st.session_state.pending_pdf_documents[document_id] = document.model_dump(mode="json")
+                st.rerun()
     with right:
         quality_icon = {"Good": "✓", "Review recommended": "!", "Poor": "×"}[page.quality.label]
         st.markdown(f"**{quality_icon} {page.quality.label}** · {page.extraction_method.replace('_', ' ')}")
-        st.caption(f"{page.character_count:,} characters · confidence score {page.quality.score:.0%}")
+        st.caption(f"{page.character_count:,} characters · text quality score {page.quality.score:.0%}")
+        if page.corrected_text is not None:
+            st.caption(":material/edit: Reviewer correction preserved")
+        if page.excluded_as_blank:
+            st.info("This page is marked as blank or non-report content.", icon=":material/do_not_disturb_on:")
         for warning in page.warning_flags:
             st.warning(warning, icon=":material/warning:")
+        if page.transformations:
+            with st.expander("Recorded text cleanup", icon=":material/history:"):
+                for transformation in page.transformations:
+                    st.caption(
+                        f"{transformation.description} ({transformation.count} occurrence(s))"
+                    )
         version = int(st.session_state.pdf_editor_versions.get(document_id, 0))
         editor_key = f"pdf_text_{document_id}_{active_page}_{version}"
         if editor_key not in st.session_state:
@@ -1214,87 +1465,91 @@ def _render_pdf_text_review(document_id: str, cancer_type: str, approved: bool) 
             help="Edit against the source image. This accepted text becomes the evidence source.",
         )
         if edited_text != page.authoritative_text:
+            page.excluded_as_blank = False
             page.accepted = False
 
+        other_pages_complete = all(
+            item.accepted for item in document.pages if item.page_number != active_page
+        )
+        accept_label = (
+            "Accept final page and continue"
+            if other_pages_complete else "Accept page and continue"
+        )
+        st.button(
+            accept_label,
+            type="primary",
+            width="stretch",
+            key=f"accept_pdf_{document_id}_{active_page}",
+            on_click=_accept_pdf_page_and_advance,
+            args=(document_id, active_page, editor_key, cancer_type, approved),
+            icon=":material/check:" if other_pages_complete else ":material/arrow_forward:",
+        )
         with st.container(horizontal=True):
-            if st.button("Accept page", type="primary", key=f"accept_pdf_{document_id}_{active_page}"):
-                try:
-                    page.corrected_text = sanitize_report_text(edited_text)
-                except ReportInputError as error:
-                    st.error(str(error))
-                else:
-                    page.accepted = True
-                    st.session_state.pending_pdf_documents[document_id] = document.model_dump(mode="json")
-                    st.rerun()
+            st.button(
+                "Mark blank / non-report",
+                key=f"blank_pdf_{document_id}_{active_page}",
+                on_click=_mark_pdf_page_blank_and_advance,
+                args=(document_id, active_page, cancer_type, approved),
+                icon=":material/do_not_disturb_on:",
+                help="Exclude this page from abstraction after explicitly reviewing it.",
+            )
             if st.button("Reset text", key=f"reset_pdf_{document_id}_{active_page}"):
                 page.corrected_text = None
+                page.excluded_as_blank = False
                 page.accepted = False
                 st.session_state.pending_pdf_documents[document_id] = document.model_dump(mode="json")
                 st.session_state.pdf_editor_versions[document_id] = version + 1
                 st.rerun()
             if st.button("Rerun OCR", key=f"ocr_pdf_{document_id}_{active_page}"):
                 with st.spinner(f"Running local OCR on page {active_page}…"):
-                    refreshed = process_pdf("document.pdf", payload, force_ocr_pages=[active_page])
-                replacement = refreshed.pages[active_page - 1]
-                document.pages[active_page - 1] = replacement
-                document.provenance.ocr_pages = sum(p.extraction_method == "ocr" for p in document.pages)
-                document.provenance.native_text_pages = len(document.pages) - document.provenance.ocr_pages
+                    refreshed = process_pdf(
+                        "document.pdf", payload, force_ocr_pages=[active_page],
+                        ocr_language=settings["language"],
+                        ocr_page_segmentation=settings["page_segmentation"],
+                        auto_orient=settings["auto_orient"],
+                        page_rotations={active_page: page.rotation_degrees},
+                    )
+                    document = merge_reprocessed_document(document, refreshed, [active_page])
                 st.session_state.pending_pdf_documents[document_id] = document.model_dump(mode="json")
                 st.session_state.pdf_editor_versions[document_id] = version + 1
+                st.session_state.pdf_review_errors.pop(document_id, None)
                 st.rerun()
 
     with st.container(horizontal=True):
-        if st.button("Accept all non-empty pages", key=f"accept_all_{document_id}"):
-            for item in document.pages:
-                if item.authoritative_text.strip():
-                    item.corrected_text = item.authoritative_text.strip()
-                    item.accepted = True
-            st.session_state.pending_pdf_documents[document_id] = document.model_dump(mode="json")
-            st.rerun()
         if st.button("Force OCR on all pages", key=f"ocr_all_{document_id}"):
-            with st.spinner("Running local OCR on all pages…"):
-                refreshed = process_pdf("document.pdf", payload, force_ocr_all=True)
-            st.session_state.pending_pdf_documents[document_id] = refreshed.model_dump(mode="json")
+            with st.status("Running local OCR on all pages…", expanded=True) as status:
+                st.write("Rendering pages and applying the selected OCR settings.")
+                refreshed = process_pdf(
+                    "document.pdf", payload, force_ocr_all=True,
+                    ocr_language=settings["language"],
+                    ocr_page_segmentation=settings["page_segmentation"],
+                    auto_orient=settings["auto_orient"],
+                    page_rotations={item.page_number: item.rotation_degrees for item in document.pages},
+                )
+                document = merge_reprocessed_document(
+                    document, refreshed, range(1, len(document.pages) + 1)
+                )
+                status.update(label="OCR complete · verify affected pages again", state="complete")
+            st.session_state.pending_pdf_documents[document_id] = document.model_dump(mode="json")
             st.session_state.pdf_editor_versions[document_id] = version + 1
+            _go_to_pdf_page(document_id, _first_priority_pdf_page(document))
             st.rerun()
-        if st.button("Discard PDF", key=f"discard_pdf_{document_id}"):
-            _clear_pending_pdf(document_id)
-            _rotate_sensitive_loader_state()
-            st.rerun()
+        st.button(
+            "Discard PDF", key=f"discard_pdf_{document_id}",
+            on_click=_discard_pending_pdf, args=(document_id,),
+        )
 
-    can_continue = all(item.accepted and item.authoritative_text.strip() for item in document.pages)
-    if st.button(
-        "Continue to abstraction", type="primary", width="stretch",
-        disabled=not can_continue, key=f"continue_pdf_{document_id}",
-    ):
-        try:
-            authoritative_text, page_ranges = assemble_accepted_text(document)
-            prepared = prepare_report(
-                authoritative_text, source="uploaded", approved=approved,
-                report_id=document.document_id,
-                description="Approved PDF pathology report",
-                cancer_type=None if cancer_type == "Not specified" else cancer_type,
-            )
-        except (PDFProcessingError, ReportInputError) as error:
-            st.error(str(error))
-        else:
-            document.provenance.reviewer_accepted_at = datetime.now(timezone.utc)
-            prepared["source_report_digest"] = document.provenance.source_report_digest
-            prepared["processed_document"] = document.model_dump(mode="json")
-            prepared["page_ranges"] = page_ranges
-            _clear_pending_pdf(document_id)
-            _load_prepared_report(prepared)
 
 
 def _render_source_loader() -> None:
     loader_version = int(st.session_state.loader_version)
-    with st.expander("Load a synthetic or approved report", expanded=_active_report() is None):
+    with st.expander("Add report", expanded=_active_report() is None):
         st.caption(
             "The identifier check is a limited safeguard, not a de-identification "
             "service. Review text before loading it."
         )
         sample_tab, paste_tab, upload_tab = st.tabs(
-            ["Sample report", "Paste text", "Upload file"]
+            ["Example", "Paste text", "Upload document"]
         )
         with sample_tab:
             samples = st.session_state.sample_reports
@@ -1375,64 +1630,120 @@ def _render_source_loader() -> None:
                 help="PDFs use native text extraction first and local OCR only when needed. "
                      "No document content is sent to an external service.",
             )
+            st.caption(
+                ":material/lock: Processing is local. Limits: PDF 25 MB / 100 pages, "
+                "TXT 500 KB, DOCX 10 MB, and JPG/PNG 15 MB / 40 megapixels."
+            )
+
+            uploaded_bytes = uploaded.getvalue() if uploaded is not None else b""
+            inspection: UploadInspection | None = None
+            upload_error: str | None = None
             if uploaded is not None:
-                ext = uploaded.name.rsplit(".", 1)[-1].lower()
-                if ext in ("jpg", "jpeg", "png"):
-                    st.caption("📷 Image file detected — text will be extracted via OCR.")
-                elif ext == "pdf":
-                    st.caption("📄 PDF detected — each page must pass OCR & text review before abstraction.")
-                elif ext == "docx":
-                    st.caption("📝 Word document detected — text will be extracted from paragraphs.")
-                else:
-                    st.caption("📃 Plain text file detected.")
-            cancer_type = st.selectbox("Cancer type", ["Not specified", "LUAD", "LUSC"],
-                                       key=_loader_widget_key("upload_cancer_type", loader_version))
+                digest = _content_digest(uploaded_bytes)
+                cached = st.session_state.upload_inspections.get(digest)
+                if cached is None:
+                    try:
+                        inspected = inspect_upload(uploaded.name, uploaded_bytes)
+                    except UploadProcessingError as error:
+                        cached = {"inspection": None, "error": str(error)}
+                    else:
+                        cached = {"inspection": inspected.model_dump(), "error": None}
+                    st.session_state.upload_inspections[digest] = cached
+                upload_error = cached.get("error")
+                if cached.get("inspection"):
+                    inspection = UploadInspection(**cached["inspection"])
+
+                with st.container(border=True):
+                    st.markdown(f":material/description: **{uploaded.name}**")
+                    if inspection:
+                        details = [
+                            inspection.extension.removeprefix(".").upper(),
+                            _format_file_size(inspection.size_bytes),
+                            inspection.processing_route,
+                        ]
+                        if inspection.page_count is not None:
+                            details.insert(2, f"{inspection.page_count} page(s)")
+                        st.caption(" · ".join(details))
+                        st.success("File validation passed.", icon=":material/check_circle:")
+                    else:
+                        st.error(upload_error or "The file could not be validated.")
+                    st.button(
+                        "Clear selected file", icon=":material/close:",
+                        key=f"clear_upload_{loader_version}",
+                        on_click=_clear_selected_upload,
+                    )
+
+            cancer_type = st.selectbox(
+                "Cancer type", ["LUAD", "LUSC"], index=None,
+                placeholder="Select before abstraction",
+                key=_loader_widget_key("upload_cancer_type", loader_version),
+                help="PDF processing can begin first, but abstraction requires an explicit cancer type.",
+            )
             approved = st.checkbox(
                 "I confirm this file is synthetic, de-identified, or approved for local research use.",
                 key=upload_approval_key,
                 on_change=_capture_upload_approval,
                 args=(loader_version,),
             )
-            if st.button("Process uploaded file", type="primary", width="stretch",
-                         key="load_uploaded_report"):
-                if uploaded is None:
-                    st.error("Choose a file before loading.")
-                else:
-                    try:
-                        uploaded_bytes = uploaded.getvalue()
-                        approval_matches_content = (
-                            approved is True
-                            and st.session_state.upload_approval_digest
-                            == _content_digest(uploaded_bytes)
+            approval_matches_content = (
+                uploaded is not None
+                and approved is True
+                and st.session_state.upload_approval_digest == _content_digest(uploaded_bytes)
+            )
+            action_label = {
+                "pdf": "Start PDF text review",
+                "image": "Run local OCR",
+                "txt": "Load report text",
+                "docx": "Load report text",
+            }.get(inspection.kind if inspection else "", "Select a valid file")
+            needs_cancer_now = inspection is not None and inspection.kind != "pdf"
+            process_disabled = (
+                inspection is None
+                or not approval_matches_content
+                or (needs_cancer_now and cancer_type is None)
+            )
+            if needs_cancer_now and cancer_type is None:
+                st.caption("Select a cancer type to load this report into abstraction.")
+            if st.button(
+                action_label, type="primary", width="stretch",
+                key="load_uploaded_report", disabled=process_disabled,
+            ):
+                assert uploaded is not None and inspection is not None
+                try:
+                    if not approval_matches_content:
+                        raise ReportInputError(
+                            "Confirm this exact file is de-identified or approved before processing."
                         )
-                        if not approval_matches_content:
-                            raise ReportInputError(
-                                "Confirm this exact file is de-identified or approved before processing."
-                            )
-                        if uploaded.name.lower().endswith(".pdf"):
-                            with st.spinner("Extracting native text and selectively running local OCR…"):
-                                document = process_pdf(uploaded.name, uploaded_bytes)
-                            st.session_state.pending_pdf_documents[document.document_id] = (
-                                document.model_dump(mode="json")
-                            )
-                            st.session_state.pending_pdf_payloads[document.document_id] = uploaded_bytes
-                            st.session_state.pdf_active_page[document.document_id] = 1
-                            st.session_state.pdf_editor_versions[document.document_id] = 0
-                            prepared = None
-                        else:
-                            extracted_text = _extract_text_from_file(uploaded.name, uploaded_bytes)
-                            if not extracted_text.strip():
-                                raise ReportInputError("No text could be extracted from this file.")
-                            prepared = prepare_report(
-                                extracted_text, source="uploaded", approved=approval_matches_content,
-                                description="Approved uploaded pathology report",
-                                cancer_type=None if cancer_type == "Not specified" else cancer_type,
-                            )
-                    except (ReportInputError, PDFProcessingError) as error:
-                        st.error(str(error))
+                    if inspection.kind == "pdf":
+                        with st.spinner("Extracting native text and selectively running local OCR…"):
+                            document = process_pdf(uploaded.name, uploaded_bytes)
+                        st.session_state.pending_pdf_documents[document.document_id] = (
+                            document.model_dump(mode="json")
+                        )
+                        st.session_state.pending_pdf_payloads[document.document_id] = uploaded_bytes
+                        first_page = _first_priority_pdf_page(document)
+                        st.session_state.pdf_active_page[document.document_id] = first_page
+                        st.session_state[f"pdf_page_{document.document_id}"] = first_page
+                        st.session_state.pdf_editor_versions[document.document_id] = 0
+                        st.session_state.pdf_ocr_settings[document.document_id] = {
+                            "language": "eng",
+                            "page_segmentation": 6,
+                            "auto_orient": True,
+                            "preview_dpi": 150,
+                        }
+                        prepared = None
                     else:
-                        if prepared is not None:
-                            _load_prepared_report(prepared)
+                        extracted_text = extract_non_pdf_text(uploaded.name, uploaded_bytes)
+                        prepared = prepare_report(
+                            extracted_text, source="uploaded", approved=True,
+                            description="Approved uploaded pathology report",
+                            cancer_type=cancer_type,
+                        )
+                except (ReportInputError, PDFProcessingError, UploadProcessingError) as error:
+                    st.error(str(error))
+                else:
+                    if prepared is not None:
+                        _load_prepared_report(prepared)
 
             if uploaded is not None and uploaded.name.lower().endswith(".pdf"):
                 pending_id = "TCGA-PDF-" + hashlib.sha256(uploaded.getvalue()).hexdigest()[:12].upper()

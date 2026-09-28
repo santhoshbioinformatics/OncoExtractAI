@@ -267,6 +267,42 @@ class TestSafeExtraction(unittest.TestCase):
         self.assertIsNone(item.extracted_value)
         self.assertEqual(item.documentation_status, DocumentationStatus.NOT_DOCUMENTED)
 
+    def test_tcga_cap_synoptic_wording_is_extracted(self):
+        report = (
+            "FINAL DIAGNOSIS\n"
+            "Histologic type: Squamous cell carcinoma, keratinizing\n"
+            "Tumor size\nGreatest dimension of tumor: 4.6 cm\n"
+            "Primary tumor (pT): pT2b\n"
+            "Regional lymph nodes (pN): pN1\n"
+        )
+
+        result = evidence_first_extract(report, "TCGA-CAP-001")
+
+        self.assertEqual(
+            variable(result, "histologic_diagnosis").extracted_value,
+            "Squamous cell carcinoma, keratinizing",
+        )
+        self.assertEqual(variable(result, "tumor_size").extracted_value, "4.6 cm")
+        self.assertEqual(variable(result, "pathological_t_category").extracted_value, "pT2b")
+        self.assertEqual(variable(result, "pathological_n_category").extracted_value, "pN1")
+        assert_exact_evidence(self, result, report)
+
+    def test_tcga_basaloid_subtype_and_greatest_diameter_are_preserved(self):
+        report = (
+            "SYNOPTIC REPORT - LUNG\n"
+            "Histologic type: BASALOID SQUAMOUS CELL CARCINOMA\n"
+            "Tumor Size:\nGreatest diameter:\n3.3cm\n"
+        )
+
+        result = evidence_first_extract(report, "TCGA-CAP-002")
+
+        self.assertEqual(
+            variable(result, "histologic_diagnosis").extracted_value,
+            "Basaloid squamous cell carcinoma",
+        )
+        self.assertEqual(variable(result, "tumor_size").extracted_value, "3.3 cm")
+        assert_exact_evidence(self, result, report)
+
     def test_both_workflow_pipelines_preserve_valid_cancer_type(self):
         results = run_both_pipelines(
             {

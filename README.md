@@ -33,7 +33,8 @@ session-entered reviewer identity, original and corrected values, exact evidence
 and the review reason. Authentication is currently disabled, so reviewer identities are
 explicitly labeled unverified in the interface and exports.
 
-1. Add a bundled synthetic report, approved text, or an approved PDF (25 MB and 100 pages maximum).
+1. Add a bundled synthetic report, approved text, or an approved document. Limits are
+   PDF 25 MB/100 pages, TXT 500 KB, DOCX 10 MB, and JPG/PNG 15 MB/40 megapixels.
 2. For PDFs, verify every page in the split OCR & text review. Native PDF text is preferred;
    poor pages fall back to local Tesseract OCR. Abstraction remains locked until every page is accepted.
 3. Work through the filterable review queue by status, priority, method, and session-only assignment.
@@ -46,6 +47,15 @@ PDF bytes, rendered page images, extracted text, and reviewer corrections are ke
 in Streamlit session memory. The app does not infer metadata from filenames and does not
 send OCR content to a remote service. Clear or discard a document when finished, close the
 browser session on a shared workstation, and do not commit document artifacts.
+
+The PDF reviewer opens the first poor or review-recommended page, shows page-level status,
+and advances after each acceptance. Blank or separator pages can be explicitly excluded.
+The final acceptance continues directly to abstraction. Advanced local OCR controls include
+installed Tesseract languages, automatic orientation, layout modes for automatic,
+multi-column, uniform-block, or sparse text, manual 90-degree rotation, and adjustable
+preview resolution. OCR retries preserve reviewer corrections but require the affected text
+to be verified again. The displayed percentage is a heuristic **text quality score**, not a
+calibrated OCR confidence estimate.
 
 The empty workspace offers a one-click synthetic example and describes the next useful
 action at each stage. In Human Review, keyboard shortcuts support `A` accept, `C`
@@ -147,12 +157,13 @@ UI, extraction logic, evidence validation, QA detection, review state, evaluatio
 
 ### Local ML extractor
 
-The ML path in [`src/ml_model.py`](src/ml_model.py) is a real offline model, not a remote LLM:
+The ML path in [`src/ml_model.py`](src/ml_model.py) is a local hybrid model, not a remote LLM:
 
-1. Character n-gram TF-IDF + logistic regression predicts each core variable label.
-2. Predicted values are accepted only when an exact report substring can be anchored.
-3. Evidence validation and QA detection still run after ML extraction.
-4. Clinical guardrails still refuse invented pT/pN categories and unanchored values.
+1. Evidence-aware candidate detection identifies explicit values, including values absent from the training labels.
+2. Character n-gram TF-IDF + logistic regression supplies contextual predictions and confidence provenance.
+3. Candidates are accepted only when an exact report substring can be anchored.
+4. Evidence validation and QA detection still run after ML extraction.
+5. Clinical guardrails still refuse invented pT/pN categories and unanchored values.
 
 Train or refresh the model from the bundled synthetic gold set:
 
