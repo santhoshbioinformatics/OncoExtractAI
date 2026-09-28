@@ -30,6 +30,16 @@ class Section(NamedTuple):
 
 PATTERNS: dict[str, list[str]] = {
     "tumor_size": [
+        r"tumou?r\s+size[^\n]{0,80}?greatest\s+dimension(?:\s+of\s+(?:the\s+)?tumou?r)?\s*"
+        r"(?:is|:|=)?\s*(\d+(?:\.\d+)?)\s*cm\b",
+        r"greatest\s+dimension(?:\s+of\s+(?:the\s+)?tumou?r)?\s*(?:is|:|=)?\s*"
+        r"(\d+(?:\.\d+)?)\s*cm\b",
+        r"greatest\s+diameter(?:\s+of\s+(?:the\s+)?tumou?r)?\s*(?:is|:|=)?\s*"
+        r"(\d+(?:\.\d+)?)\s*cm\b",
+        r"(?:size|dimension)\s+of\s+(?:invasive\s+)?(?:carcinoma|tumou?r)\s*"
+        r"(?:is|:|=)?\s*(\d+(?:\.\d+)?)\s*cm\b",
+        r"tumou?r\s+size\s*(?:is|:|=)?\s*(\d+(?:\.\d+)?)\s*[x×]\s*"
+        r"\d+(?:\.\d+)?(?:\s*[x×]\s*\d+(?:\.\d+)?)?\s*cm\b",
         r"\b(?:tumou?r|mass|lesion|carcinoma)\s+(?:measuring|measures?|measured)\s+"
         r"(?:approximately\s+|about\s+)?(\d+(?:\.\d+)?)\s*cm\b",
         r"(\d+(?:\.\d+)?)\s*cm\s*(?:in\s*)?(?:greatest\s*)?dimension\b",
@@ -50,6 +60,10 @@ PATTERNS: dict[str, list[str]] = {
     ],
     "histologic_diagnosis": [
         r"\b(minimally\s+invasive\s+adenocarcinoma)\b",
+        r"\b(basaloid\s+squamous\s+cell\s+carcinoma)\b",
+        r"\b(adenocarcinoma\s*,?\s*(?:acinar|papillary|micropapillary|lepidic|solid)"
+        r"(?:\s+predominant)?(?:\s+pattern)?)\b",
+        r"\b(squamous\s+cell\s+carcinoma\s*,?\s*(?:keratinizing|non[-\s]?keratinizing))\b",
         r"\b((?:well|moderately|poorly)[-\s]+differentiated\s+(?:invasive\s+)?squamous\s+cell\s+carcinoma)\b",
         r"\b((?:invasive\s+)?squamous\s+cell\s+carcinoma)\b",
         r"\b((?:invasive\s+)?adenocarcinoma(?:\s+with\s+(?:predominant\s+)?(?:lepidic|acinar|papillary|micropapillary|solid)(?:\s+and\s+(?:lepidic|acinar|papillary|micropapillary|solid))*\s+growth\s+pattern)?)\b",
@@ -143,6 +157,8 @@ def _normalize_value(variable_name: str, value: str) -> str:
             suffix = "X" if suffix.casefold() == "x" else suffix[0] + suffix[1:].casefold()
             return f"pN{suffix}"
     if variable_name == "histologic_diagnosis" and value:
+        if value.isupper():
+            value = value.lower()
         return value[0].upper() + value[1:]
     return value
 

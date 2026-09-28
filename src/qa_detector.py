@@ -11,6 +11,7 @@ from .schemas import (
     ExtractionResult,
     QAIssue,
     QAIssueType,
+    ProcessedDocument,
     VariableExtraction,
 )
 
@@ -29,9 +30,76 @@ class QADetector:
         issues = self._check_explicit_amendments(report_text)
         for variable in result.variables:
             issues.extend(self._check_variable_status(variable))
+            issues.extend(self._check_missing_synoptic_stage(variable, report_text))
             if variable.variable_name == "pathological_n_category":
                 issues.extend(self._check_nodal_consistency(variable, report_text))
         return issues
+
+    def _check_missing_synoptic_stage(
+        self,
+        variable: VariableExtraction,
+        report_text: str,
+    ) -> list[QAIssue]:
+        """Flag a likely extraction gap without deriving a TNM category."""
+
+        if variable.variable_name not in {
+            "pathological_t_category",
+            "pathological_n_category",
+        } or variable.extracted_value is not None:
+            return []
+        synoptic = re.search(r"\bsynoptic\s+report\b", report_text, re.IGNORECASE)
+        if synoptic is None:
+            return []
+        axis = "pT" if variable.variable_name == "pathological_t_category" else "pN"
+        category_pattern = r"\bpT(?:1mi|is|X|0|1[abc]?|2[ab]?|3|4)\b" if axis == "pT" else r"\bpN(?:X|[0-3])\b"
+        if re.search(category_pattern, report_text, re.IGNORECASE):
+            return []
+        return [
+            QAIssue(
+                issue_type=QAIssueType.OCR_QUALITY,
+                variable_name=variable.variable_name,
+                description=(
+                    f"A synoptic report is present, but no explicit {axis} category was "
+                    "captured in the accepted text. The staging table may be incomplete."
+                ),
+                severity="high",
+                evidence=[self._span(report_text, synoptic.start(), synoptic.end())],
+                suggestion=(
+                    "Compare the staging section with the page image and rerun OCR on the "
+                    f"relevant page. Do not derive {axis} from tumor size or node counts."
+                ),
+            )
+        ]
+
+    @staticmethod
+    def detect_document_issues(document: ProcessedDocument | None) -> list[QAIssue]:
+        """Surface OCR uncertainty as report-level QA, without clinical inference."""
+
+        if document is None:
+            return []
+        poor = [
+            page.page_number for page in document.pages
+            if not page.excluded_as_blank and page.quality.label == "Poor"
+        ]
+        review = [
+            page.page_number for page in document.pages
+            if not page.excluded_as_blank and page.quality.label == "Review recommended"
+        ]
+        if poor:
+            return [QAIssue(
+                issue_type=QAIssueType.OCR_QUALITY,
+                description=f"Poor text extraction quality on page(s): {', '.join(map(str, poor))}.",
+                severity="high",
+                suggestion="Compare the accepted text against each page image before reviewing fields.",
+            )]
+        if review:
+            return [QAIssue(
+                issue_type=QAIssueType.OCR_QUALITY,
+                description=f"Text extraction should be checked on page(s): {', '.join(map(str, review))}.",
+                severity="medium",
+                suggestion="Verify the accepted text against the source page.",
+            )]
+        return []
 
     @staticmethod
     def _span(report_text: str, start: int, end: int) -> EvidenceSpan:
@@ -240,10 +308,11 @@ class QADetector:
         self,
         report_text: str,
         result: ExtractionResult,
+        document: ProcessedDocument | None = None,
     ) -> ExtractionResult:
         """Add non-duplicate QA issues and synchronize priority and explanation."""
 
-        detected = self.detect_issues(report_text, result)
+        detected = self.detect_issues(report_text, result) + self.detect_document_issues(document)
         existing = {(issue.issue_type, issue.variable_name) for issue in result.qa_issues}
         for issue in detected:
             key = (issue.issue_type, issue.variable_name)

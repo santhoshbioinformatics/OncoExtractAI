@@ -33,3 +33,11 @@ models/*.joblib
 # Real-world/raw datasets are local-only and are not demo assets
 data/raw/
 data/processed/
+
+# Sensitive document-processing artifacts must remain local and ephemeral
+*.pdf
+page-images/
+extracted-text/
+corrected-text/
+ocr-temp/
+tmp-ocr/

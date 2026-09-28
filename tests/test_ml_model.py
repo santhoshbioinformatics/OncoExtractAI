@@ -88,6 +88,49 @@ class TestPathologyMLExtractor(unittest.TestCase):
                     },
                 )
 
+    def test_ml_extracts_unseen_tcga_synoptic_values_from_exact_evidence(self) -> None:
+        report = (
+            "FINAL DIAGNOSIS\n"
+            "Histologic type: Adenocarcinoma, acinar predominant\n"
+            "Tumor size\nGreatest dimension of tumor: 6.7 cm\n"
+            "Pathologic staging (pTNM)\n"
+            "Primary tumor (pT): pT4\n"
+            "Regional lymph nodes (pN): pN2\n"
+        )
+
+        result = ml_extract(report, "TCGA-SYNOPTIC-001", model=self.model)
+        by_name = {item.variable_name: item for item in result.variables}
+
+        self.assertEqual(
+            by_name["histologic_diagnosis"].extracted_value,
+            "Adenocarcinoma, acinar predominant",
+        )
+        self.assertEqual(by_name["tumor_size"].extracted_value, "6.7 cm")
+        self.assertEqual(by_name["pathological_t_category"].extracted_value, "pT4")
+        self.assertEqual(by_name["pathological_n_category"].extracted_value, "pN2")
+        for item in result.variables:
+            self.assertEqual(item.documentation_status, DocumentationStatus.SUPPORTED)
+            self.assertTrue(item.evidence)
+            for span in item.evidence or []:
+                self.assertEqual(report[span.start_offset:span.end_offset], span.text)
+
+        workflow_result = run_extraction_pipeline(
+            {
+                "report_id": "TCGA-SYNOPTIC-001",
+                "text": report,
+                "cancer_type": "LUAD",
+            },
+            "ml",
+        )
+        workflow_fields = {
+            item.variable_name: item for item in workflow_result.variables
+        }
+        self.assertEqual(workflow_fields["tumor_size"].extracted_value, "6.7 cm")
+        self.assertEqual(
+            workflow_fields["tumor_size"].documentation_status,
+            DocumentationStatus.SUPPORTED,
+        )
+
     def test_workflow_ml_method(self) -> None:
         report = {
             "report_id": "ML-TEST-003",

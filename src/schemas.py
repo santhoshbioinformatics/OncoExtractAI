@@ -73,10 +73,16 @@ def _value_evidence_pattern(
     normalized_value = re.sub(r"\s+", " ", value.casefold()).strip()
     if variable_name == "tumor_size":
         number = re.search(r"\d+(?:\.\d+)?", normalized_value)
+        if not number:
+            return None
+        value_number = re.escape(number.group(0))
+        # Synoptic reports commonly state the greatest dimension as the first
+        # number in a multi-dimensional measurement (for example,
+        # ``3.3 x 2.5 cm``). The canonical value remains ``3.3 cm``, while the
+        # exact evidence must retain the original report wording.
         return (
-            rf"(?<![\d.]){re.escape(number.group(0))}\s*cm\b"
-            if number
-            else None
+            rf"(?<![\d.]){value_number}(?:\s*cm\b|"
+            rf"(?:\s*[x×]\s*\d+(?:\.\d+)?){{1,2}}\s*cm\b)"
         )
     if variable_name in {"pathological_t_category", "pathological_n_category"}:
         return rf"\b{re.escape(normalized_value)}\b"
@@ -162,6 +168,9 @@ def evidence_text_supports_value(
             rf"\b(?:tumou?r|mass|lesion|carcinoma)\s+(?:is\s+|measur\w*\s+)?{candidate_pattern}",
             rf"\b(?:amended|revised|estimated|maximum)\s+size\b[^.\n]{{0,50}}{candidate_pattern}",
             rf"\bsize\s*(?::|is)?\s*(?:approximately\s+|about\s+)?{candidate_pattern}",
+            rf"\bgreatest\s+dimension(?:\s+of\s+(?:the\s+)?tumou?r)?\s*(?::|is|=)?\s*{candidate_pattern}",
+            rf"\bgreatest\s+diameter(?:\s+of\s+(?:the\s+)?tumou?r)?\s*(?::|is|=)?\s*{candidate_pattern}",
+            rf"\b(?:size|dimension)\s+of\s+(?:invasive\s+)?(?:carcinoma|tumou?r)\s*(?::|is|=)?\s*{candidate_pattern}",
             rf"{candidate_pattern}[^.\n]{{0,35}}\b(?:greatest\s+dimension|tumou?r|mass|lesion)\b",
             rf"\b(?:gross|microscopic|synoptic|narrative)\s+(?:section\s+)?records\s+{candidate_pattern}",
         )
@@ -422,6 +431,7 @@ class EvidenceSpan(StrictModel):
     text: str = Field(..., min_length=1)
     start_offset: int = Field(..., ge=0)
     end_offset: int = Field(..., gt=0)
+    page_number: int | None = Field(default=None, ge=1)
 
     @model_validator(mode="after")
     def valid_character_span(self) -> "EvidenceSpan":
@@ -429,6 +439,82 @@ class EvidenceSpan(StrictModel):
             raise ValueError("end_offset must be greater than start_offset")
         if self.end_offset - self.start_offset != len(self.text):
             raise ValueError("offset span length must equal the evidence text length")
+        return self
+
+
+class TextTransformation(StrictModel):
+    """One conservative, reviewable text-normalization operation."""
+
+    transformation: str = Field(..., min_length=1)
+    count: int = Field(..., ge=1)
+    description: str = Field(..., min_length=1)
+
+
+class OCRQualityAssessment(StrictModel):
+    """Transparent page-level extraction quality assessment."""
+
+    label: Literal["Good", "Review recommended", "Poor"]
+    score: float = Field(..., ge=0, le=1)
+    reasons: list[str] = Field(default_factory=list)
+
+
+class ProcessedPage(StrictModel):
+    """Extracted and reviewer-controlled state for a single PDF page."""
+
+    page_number: int = Field(..., ge=1)
+    extraction_method: Literal["native_text", "ocr"]
+    raw_text: str = ""
+    normalized_text: str = ""
+    corrected_text: str | None = None
+    accepted: bool = False
+    excluded_as_blank: bool = False
+    rotation_degrees: Literal[0, 90, 180, 270] = 0
+    ocr_language: str | None = None
+    ocr_page_segmentation: int | None = Field(default=None, ge=3, le=13)
+    character_count: int = Field(..., ge=0)
+    quality: OCRQualityAssessment
+    warning_flags: list[str] = Field(default_factory=list)
+    transformations: list[TextTransformation] = Field(default_factory=list)
+
+    @property
+    def authoritative_text(self) -> str:
+        if self.excluded_as_blank:
+            return ""
+        return self.corrected_text if self.corrected_text is not None else self.raw_text
+
+    @model_validator(mode="after")
+    def coherent_review_state(self) -> "ProcessedPage":
+        if self.excluded_as_blank and not self.accepted:
+            raise ValueError("a page excluded as blank must be explicitly accepted")
+        return self
+
+
+class DocumentProvenance(StrictModel):
+    """Document-level provenance retained through extraction and review."""
+
+    source_report_digest: str = Field(..., pattern=r"^sha256:[0-9a-f]{64}$")
+    extraction_timestamp: datetime
+    processor_version: str = Field(..., min_length=1)
+    page_count: int = Field(..., ge=1)
+    native_text_pages: int = Field(..., ge=0)
+    ocr_pages: int = Field(..., ge=0)
+    reviewer_accepted_at: datetime | None = None
+
+
+class ProcessedDocument(StrictModel):
+    """Validated, page-aware PDF processing result."""
+
+    document_id: str = Field(..., pattern=r"^TCGA-PDF-[0-9A-F]{12}$")
+    pages: list[ProcessedPage] = Field(..., min_length=1)
+    provenance: DocumentProvenance
+
+    @model_validator(mode="after")
+    def coherent_pages(self) -> "ProcessedDocument":
+        expected = list(range(1, len(self.pages) + 1))
+        if [page.page_number for page in self.pages] != expected:
+            raise ValueError("processed pages must be sequential and one-indexed")
+        if self.provenance.page_count != len(self.pages):
+            raise ValueError("provenance page_count must match processed pages")
         return self
 
 
@@ -563,6 +649,7 @@ class QAIssueType(str, Enum):
     EVIDENCE_MISMATCH = "evidence_mismatch"
     OFFSET_MISMATCH = "offset_mismatch"
     MANUAL_REVIEW = "manual_review_required"
+    OCR_QUALITY = "ocr_quality"
 
 
 class QAIssue(StrictModel):
@@ -584,6 +671,9 @@ class ExtractionResult(StrictModel):
     report_id: str = Field(..., min_length=1)
     cancer_type: CancerType | None = None
     method: Literal["baseline", "evidence_first", "ml"]
+    model_version: str = Field(default="unversioned", min_length=1)
+    source_report_digest: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
+    document_provenance: DocumentProvenance | None = None
     variables: list[VariableExtraction] = Field(..., min_length=len(CORE_VARIABLES), max_length=len(CORE_VARIABLES))
     qa_issues: list[QAIssue] = Field(default_factory=list)
     manual_review_required: bool = False
